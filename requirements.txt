@@ -1,0 +1,19 @@
+# requirements.txt
+langchain>=1.0
+langchain-classic>=1.0  # MultiVectorRetriever. langchain 1.x에서 분리됨 (필수)
+langchain-openai
+langchain-community
+langchain-chroma
+langchain-experimental
+langchain-ollama
+unstructured[all-docs]
+unstructured-inference  # partition_pdf 필수. all-docs만으로는 설치되지 않음
+pillow
+pydantic
+lxml
+matplotlib
+chromadb
+tiktoken
+python-dotenv
+ipykernel
+jupyterlab
