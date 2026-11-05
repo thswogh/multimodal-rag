@@ -9,6 +9,10 @@ data/figures/
 *.pdf
 data/processed
 
+#pkl 파일
+processed/
+*.pkl
+
 # 벡터 DB
 chroma_db/
 
