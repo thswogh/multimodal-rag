@@ -32,25 +32,73 @@ PDF의 **텍스트·표·이미지**를 따로 추출해서 각각 요약하고,
 
 ## 아키텍처
 
-```
-PDF ─▶ ① 파싱 (partition_pdf)
-         ├─ 텍스트 → 분할 → 요약 ─┐
-         ├─ 표     → 요약 ────────┼─▶ ② 요약은 벡터DB에 임베딩, 원본은 문서 저장소에 저장
-         └─ 이미지 → VLM 요약 ────┘          │
-                                             ▼
-                     질문 ─▶ 요약으로 검색 ─▶ 원본(텍스트·표·이미지) 반환
-                                             │
-                                             ▼
-                              ③ 멀티모달 LLM이 답변 생성 ─▶ 한국어 번역
+```mermaid
+flowchart TB
+    PDF[/"invest.pdf<br/>투자설명서 39쪽"/]
+
+    subgraph S1["① 파싱 · 요약 — 01, 02 노트북"]
+        direction TB
+        P["partition_pdf<br/>strategy=hi_res · chunking=by_title"]
+        TXT["텍스트 블록 39개<br/>→ 2000토큰 재분할 → 27개"]
+        TAB["표 35개<br/>행·열 구조 복원"]
+        IMG["이미지 6개<br/>data/figures/*.jpg"]
+        B64["Base64 인코딩"]
+        STXT["텍스트 요약 27건<br/>gpt-4o-mini"]
+        STAB["표 요약 35건<br/>gpt-4o-mini"]
+        SIMG["이미지 요약 6건<br/>gpt-4o-mini Vision"]
+        P --> TXT & TAB & IMG
+        TXT --> STXT
+        TAB --> STAB
+        IMG --> B64 --> SIMG
+    end
+
+    subgraph S2["② 저장 · 검색 — 03 노트북"]
+        direction LR
+        VS[("Chroma 벡터DB<br/>요약 68건 임베딩<br/>text-embedding-3-small")]
+        DS[("InMemoryStore<br/>원본 68건")]
+        VS <-.->|"같은 doc_id (uuid4)"| DS
+    end
+
+    subgraph S3["③ 답변 생성 — 03 노트북"]
+        direction LR
+        Q(["사용자 질문"])
+        R["MultiVectorRetriever<br/>요약 유사도 검색 → 원본 4건 반환"]
+        SP["split_image_text_types<br/>Base64는 이미지 · 나머지는 텍스트"]
+        LLM["gpt-4o-mini 멀티모달<br/>원본 이미지 + 원본 텍스트·표 + 질문"]
+        ANS(["한국어 답변"])
+        Q --> R --> SP --> LLM --> ANS
+    end
+
+    PDF --> P
+    STXT & STAB & SIMG --> VS
+    TXT & TAB & B64 --> DS
+    S2 ~~~ S3
+    R -.->|"① 비슷한 요약 찾기"| VS
+    DS -.->|"② doc_id로 원본 꺼내기"| R
 ```
 
-1. **파싱**: Unstructured의 `partition_pdf()`로 PDF를 텍스트·표·이미지 요소로 나눕니다.
-2. **저장과 검색**: 요약은 Chroma에 임베딩하고, 원본은 문서 저장소에 같은 ID로 저장합니다. 검색은 요약으로 하고, 결과로는 원본을 돌려줍니다. 도서관의 색인 카드와 같은 방식입니다.
-3. **답변 생성**: 검색으로 찾은 원본 텍스트·표·이미지를 멀티모달 LLM에 넘겨 답변을 만듭니다.
+> 실선: 데이터 흐름 (요약은 벡터DB로, 원본은 docstore로) · 점선: 질문이 들어왔을 때의 검색 흐름
+
+1. **파싱·요약**: `partition_pdf()`로 PDF를 텍스트·표·이미지로 나눈 뒤, 텍스트와 표는 LLM으로, 이미지는 Base64로 바꿔 VLM으로 요약합니다.
+2. **저장과 검색**: 요약 68건은 Chroma에 임베딩하고, 원본 68건은 InMemoryStore에 같은 `doc_id`로 저장합니다. 검색은 요약으로 하고, 결과는 그 `doc_id`로 꺼낸 원본입니다.
+3. **답변 생성**: 검색된 원본을 Base64 이미지와 텍스트로 나누고, 둘 다 멀티모달 LLM에 넘겨 답변을 만듭니다.
 
 **왜 이미지를 요약하나요?** 이미지는 그대로는 검색할 수 없습니다. 텍스트 요약으로 바꿔야 임베딩해서 검색할 수 있습니다.
 
 **요약만 LLM에 주면 안 되나요?** 요약하면 디테일이 사라집니다. 그래서 검색에는 요약을 쓰고, 답변 생성에는 원본을 씁니다.
+
+## 기술 선택 근거
+
+| 구분 | 선택 | 이유 |
+|---|---|---|
+| **PDF 파싱** | `partition_pdf(strategy="hi_res")` | 이 문서는 상환 조건·일정이 표로, 상환 빈도가 그래프로 들어 있습니다. 글자만 읽는 `fast` 전략은 표가 줄글로 뭉개지고 그래프는 버려지므로, 레이아웃 모델로 표·그림 영역을 찾는 `hi_res`를 썼습니다. 대신 파싱에 약 169초가 걸립니다. |
+| **표 구조** | `infer_table_structure=True` | "2차 평가일에 몇 %를 받나요?"처럼 행과 열을 짚어야 하는 질문이 많아서, 표를 HTML 구조로 복원했습니다. |
+| **텍스트 분할** | 청크 2000토큰 · 겹침 200토큰 (`tiktoken` 기준) | 투자설명서는 한 조항이 길게 이어지는 경우가 많아서, 조항이 중간에 끊기지 않을 만큼 크게 잡았습니다. 경계에 걸린 문장이 한쪽에는 온전히 남도록 10%를 겹쳤습니다. 한글은 글자 수와 토큰 수 차이가 커서 글자가 아니라 토큰 기준으로 잘랐습니다. |
+| **요약 · 답변 모델** | `gpt-4o-mini` (temperature 0) | 텍스트·표·이미지 요약과 최종 답변을 한 모델로 처리할 수 있고(비전 지원), 요약 68건을 만들기에 비용이 부담되지 않습니다. 수치를 그대로 옮겨야 하는 문서라 temperature는 0으로 고정했습니다. |
+| **임베딩** | `text-embedding-3-small` | 검색 대상이 요약 68건으로 많지 않아 작은 모델로도 충분하고, 비용과 속도가 유리합니다. Before/After 비교의 공정성을 위해 텍스트 전용 RAG에도 같은 모델을 썼습니다. |
+| **프롬프트 언어** | 텍스트·표는 한국어 지시, 이미지는 **영어 지시 + 한국어 출력** | 텍스트·표 요약은 한국어 프롬프트로도 결과가 안정적이었습니다. 이미지 요약은 영어 지시문이 결과가 더 안정적이라 지시는 영어로, 출력은 질문 언어(한국어)와 맞추려고 한국어로 받았습니다. 요약과 질문의 언어가 같아야 임베딩 검색이 잘 맞습니다. |
+| **동시 요청 수** | `max_concurrency=2` | 표 35건을 한꺼번에 요약할 때 요청 제한(RateLimit)에 걸리지 않도록 교안 기본값 5에서 2로 낮췄습니다. |
+| **저장소** | Chroma + InMemoryStore | 실습 규모에서 설치 없이 바로 쓸 수 있습니다. 대신 커널을 끄면 사라집니다([한계](#한계) 참고). |
 
 ## 프로젝트 구조
 
@@ -59,11 +107,15 @@ multimodal-rag/
 ├── .env.example            # 필요한 환경변수 템플릿 (.env는 Git 제외)
 ├── requirements.txt        # 의존성 목록 (사람이 관리)
 ├── requirements.lock.txt   # 버전 고정 목록 (기계가 재현)
-├── data/
-│   ├── invest.pdf          # 원본 PDF (Git 제외)
-│   └── figures/            # 추출된 이미지 (Git 제외)
+├── image.png               # Before/After 비교 캡처
+├── data/                   # (Git 제외)
+│   ├── invest.pdf          # 원본 PDF
+│   ├── figures/            # 추출된 이미지 6개
+│   └── processed/          # 단계별 결과 (extracted.pkl, summaries.pkl)
 ├── notebooks/
-│   └── Multi_modal_RAG.ipynb
+│   ├── 01_데이터추출__연습본.ipynb       # ① 파싱·텍스트 분할
+│   ├── 02_요약생성_학습.ipynb            # ① 텍스트·표·이미지 요약
+│   └── 03_임베딩_최종체인_연습.ipynb     # ②③ 검색기·최종 체인·Before/After·질의응답
 └── src/
     ├── extract.py          # PDF 파싱
     ├── summarize.py        # 요약 체인
@@ -71,9 +123,10 @@ multimodal-rag/
 ```
 
 ## Before(텍스트RAG) / After(멀티모달RAG) 비교
-![alt text](image.png)
-텍스트 RAG에는 질문 내용이 포함되지 않아 LLM이 모른다고 답변하였지만, 
-멀티모달RAG는 표, 이미지에서 찾아 답변을 생성해 주었따.
+![Before/After 비교: 텍스트 전용 RAG와 멀티모달 RAG의 답변](image.png)
+
+텍스트 RAG에는 질문 내용이 포함되지 않아 LLM이 모른다고 답변하였지만,
+멀티모달RAG는 표, 이미지에서 찾아 답변을 생성해 주었다.
 
 ## 질의응답 5건
 
@@ -87,6 +140,15 @@ multimodal-rag/
 
 - 2~5번은 표와 텍스트 원본을 근거로 정확한 날짜와 비율을 답했다.
 - 1번은 검색 결과에 해당 이미지가 들어 있었지만, LLM이 그림 속 수치(1차 상환 97.21%)를 읽지 못하고 모른다고 답했다.
+
+## 한계
+1. **한국어 OCR을 지정하지 않았습니다.** 파싱 때 `No languages specified, defaulting to English` 경고가 나왔고, "목 차 투 자 설 명 서"처럼 글자 사이가 벌어진 텍스트도 있었습니다. `languages=["kor", "eng"]`를 지정하면 개선될 여지가 있습니다.
+2. **이미지 요약이 추측성일 때가 있습니다.** "~그래프 같습니다"처럼 단정하지 못하는 요약이 있습니다. 요약이 부정확하면 그 이미지는 검색되지 않으므로, 이미지 6건은 직접 열어 대조했습니다.
+3. **추출된 이미지 수와 PDF 속 실제 그림 수가 다릅니다.** 추출된 이미지 파일은 6개지만, 페이지를 직접 확인하면 그림과 그림으로 된 표는 7개입니다.
+4. **저장소가 휘발성입니다.** Chroma와 InMemoryStore 모두 메모리에만 있어서, 커널을 다시 시작하면 색인을 처음부터 다시 만들어야 합니다. 실제 서비스라면 Chroma의 `persist_directory`나 외부 DB와, 디스크 기반 docstore로 바꿔야 합니다.
+5. **처리 시간과 비용이 듭니다.** 파싱 약 169초, 텍스트·표 요약 약 62초, 이미지 요약 약 23초가 걸리고, 요약 68건과 질의마다 API 비용이 발생합니다. 문서가 길어지면 비례해서 늘어납니다.
+6. **이미지 판별을 정규식에 의존합니다.** 검색 결과가 이미지인지를 "영문·숫자·`+/=`가 100자 이상 이어지는가"로 판별하므로, 긴 코드나 식별자 같은 텍스트를 이미지로 잘못 볼 수 있습니다. 메타데이터에 원본 종류를 함께 저장하는 방식이 더 안전합니다.
+
 ## 실행 방법
 
 ### 1. OS 프로그램 설치 (pip로 설치되지 않음)
@@ -140,7 +202,7 @@ cp .env.example .env   # 그다음 .env에 실제 OPENAI_API_KEY를 입력
 python -m ipykernel install --user --name multimodal-rag --display-name "Python (multimodal-rag)"
 ```
 
-VS Code에서 `notebooks/Multi_modal_RAG.ipynb`를 열고, 커널로 **Python (multimodal-rag)**를 선택한 뒤 실행하세요.
+`data/` 폴더에 PDF를 넣고, VS Code에서 `notebooks/`의 노트북을 **01 → 02 → 03 순서로** 실행하세요. 커널은 **Python (multimodal-rag)**를 선택합니다. 앞 노트북이 `data/processed/`에 저장한 결과를 다음 노트북이 불러옵니다.
 
 ## 주요 패키지
 
@@ -150,7 +212,7 @@ VS Code에서 `notebooks/Multi_modal_RAG.ipynb`를 열고, 커널로 **Python (m
 | `langchain-classic` | `MultiVectorRetriever` (LangChain 1.x에서 분리됨) |
 | `langchain-chroma`, `chromadb` | 요약 임베딩을 저장하는 벡터 검색 엔진 |
 | `langchain-openai` | LLM / VLM 및 임베딩 |
-| `langchain-ollama` | 로컬 오픈소스 모델 (번역 체인 등) |
+| `langchain-ollama` | 로컬 오픈소스 모델 연동 (이번 구현에서는 미사용) |
 | `pillow` | 추출 이미지 전처리 |
 | `tiktoken` | 토큰 단위 텍스트 분할 |
 | `python-dotenv` | `.env`에서 API 키 로딩 |
