@@ -33,55 +33,34 @@ PDF의 **텍스트·표·이미지**를 따로 추출해서 각각 요약하고,
 ## 아키텍처
 
 ```mermaid
-flowchart TB
-    PDF[/"invest.pdf<br/>투자설명서 39쪽"/]
-
-    subgraph S1["① 파싱 · 요약 — 01, 02 노트북"]
+flowchart LR
+    subgraph S1["① 파싱 · 요약"]
         direction TB
-        P["partition_pdf<br/>strategy=hi_res · chunking=by_title"]
-        TXT["텍스트 블록 39개<br/>→ 2000토큰 재분할 → 27개"]
-        TAB["표 35개<br/>행·열 구조 복원"]
-        IMG["이미지 6개<br/>data/figures/*.jpg"]
-        B64["Base64 인코딩"]
-        STXT["텍스트 요약 27건<br/>gpt-4o-mini"]
-        STAB["표 요약 35건<br/>gpt-4o-mini"]
-        SIMG["이미지 요약 6건<br/>gpt-4o-mini Vision"]
-        P --> TXT & TAB & IMG
-        TXT --> STXT
-        TAB --> STAB
-        IMG --> B64 --> SIMG
+        A[/"invest.pdf (39쪽)"/] --> B["partition_pdf<br/>hi_res"]
+        B --> C["텍스트 27 · 표 35 · 이미지 6"]
+        C --> D["요약 68건<br/>텍스트·표: LLM / 이미지: VLM"]
     end
 
-    subgraph S2["② 저장 · 검색 — 03 노트북"]
-        direction LR
-        VS[("Chroma 벡터DB<br/>요약 68건 임베딩<br/>text-embedding-3-small")]
-        DS[("InMemoryStore<br/>원본 68건")]
-        VS <-.->|"같은 doc_id (uuid4)"| DS
+    subgraph S2["② 저장 · 검색"]
+        direction TB
+        E[("벡터DB (Chroma)<br/>요약 68건")]
+        F[("문서 저장소<br/>원본 68건")]
+        E <-->|"같은 doc_id"| F
     end
 
-    subgraph S3["③ 답변 생성 — 03 노트북"]
-        direction LR
-        Q(["사용자 질문"])
-        R["MultiVectorRetriever<br/>요약 유사도 검색 → 원본 4건 반환"]
-        SP["split_image_text_types<br/>Base64는 이미지 · 나머지는 텍스트"]
-        LLM["gpt-4o-mini 멀티모달<br/>원본 이미지 + 원본 텍스트·표 + 질문"]
-        ANS(["한국어 답변"])
-        Q --> R --> SP --> LLM --> ANS
+    subgraph S3["③ 답변 생성"]
+        direction TB
+        G(["질문"]) --> H["요약으로 검색<br/>→ 원본 꺼내기"]
+        H --> I["멀티모달 LLM<br/>원본 이미지 + 텍스트"]
+        I --> J(["한국어 답변"])
     end
 
-    PDF --> P
-    STXT & STAB & SIMG --> VS
-    TXT & TAB & B64 --> DS
-    S2 ~~~ S3
-    R -.->|"① 비슷한 요약 찾기"| VS
-    DS -.->|"② doc_id로 원본 꺼내기"| R
+    S1 --> S2 --> S3
 ```
 
-> 실선: 데이터 흐름 (요약은 벡터DB로, 원본은 docstore로) · 점선: 질문이 들어왔을 때의 검색 흐름
-
-1. **파싱·요약**: `partition_pdf()`로 PDF를 텍스트·표·이미지로 나눈 뒤, 텍스트와 표는 LLM으로, 이미지는 Base64로 바꿔 VLM으로 요약합니다.
-2. **저장과 검색**: 요약 68건은 Chroma에 임베딩하고, 원본 68건은 InMemoryStore에 같은 `doc_id`로 저장합니다. 검색은 요약으로 하고, 결과는 그 `doc_id`로 꺼낸 원본입니다.
-3. **답변 생성**: 검색된 원본을 Base64 이미지와 텍스트로 나누고, 둘 다 멀티모달 LLM에 넘겨 답변을 만듭니다.
+1. **파싱·요약**: `partition_pdf(strategy="hi_res")`로 PDF를 텍스트·표·이미지로 나누고, 텍스트는 2000토큰 단위로 다시 잘라 39개 → 27개로 만듭니다. 텍스트·표는 `gpt-4o-mini`로, 이미지는 Base64로 바꿔 같은 모델의 비전 기능(VLM)으로 요약합니다.
+2. **저장·검색**: 요약 68건은 `text-embedding-3-small`로 임베딩해 Chroma에, 원본 68건은 InMemoryStore에 **같은 `doc_id`**로 저장합니다. 검색은 요약으로 하고, 결과는 그 `doc_id`로 꺼낸 원본(상위 4건)입니다.
+3. **답변 생성**: 검색된 원본을 Base64 이미지와 텍스트로 나눈 뒤(`split_image_text_types`), 둘 다 멀티모달 LLM에 넘겨 한국어로 답변합니다.
 
 **왜 이미지를 요약하나요?** 이미지는 그대로는 검색할 수 없습니다. 텍스트 요약으로 바꿔야 임베딩해서 검색할 수 있습니다.
 
