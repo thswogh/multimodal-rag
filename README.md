@@ -107,7 +107,8 @@ multimodal-rag/
 ├── .env.example            # 필요한 환경변수 템플릿 (.env는 Git 제외)
 ├── requirements.txt        # 의존성 목록 (사람이 관리)
 ├── requirements.lock.txt   # 버전 고정 목록 (기계가 재현)
-├── image.png               # Before/After 비교 캡처
+├── assets/
+│   └── before_after.png    # Before/After 비교 캡처
 ├── data/                   # (Git 제외)
 │   ├── invest.pdf          # 원본 PDF
 │   ├── figures/            # 추출된 이미지 6개
@@ -123,7 +124,7 @@ multimodal-rag/
 ```
 
 ## Before(텍스트RAG) / After(멀티모달RAG) 비교
-![Before/After 비교: 텍스트 전용 RAG와 멀티모달 RAG의 답변](image.png)
+![Before/After 비교: 텍스트 전용 RAG와 멀티모달 RAG의 답변](assets/before_after.png)
 
 텍스트 RAG에는 질문 내용이 포함되지 않아 LLM이 모른다고 답변하였지만,
 멀티모달RAG는 표, 이미지에서 찾아 답변을 생성해 주었다.
